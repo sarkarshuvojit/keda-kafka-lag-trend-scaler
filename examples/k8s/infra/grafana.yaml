@@ -184,7 +184,7 @@ data:
           "targets": [
             {
               "datasource": { "type": "prometheus", "uid": "prometheus" },
-              "expr": "increase(kafka_lag_scaler_activations_total[30s]) > 0",
+              "expr": "max_over_time(kafka_lag_scaler_stalled[30s]) > 0",
               "legendFormat": "stalled",
               "interval": "10s"
             }

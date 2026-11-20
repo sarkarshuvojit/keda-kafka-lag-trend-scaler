@@ -105,7 +105,13 @@ One consumer doing ~10 msg/s, `maxDrainSeconds: 120`, `headroom: 1.2`:
 
 ![Consumer count vs. lag, annotated](./docs/test-results-annotated.png)
 
-> This run predates the trend model. It was taken with the earlier "lag above threshold for N seconds" scaler and needs re-running against the current one. See [docs/local-test.md](./docs/local-test.md).
+One consumer (~10 msg/s), 10 partitions, `MAX_DRAIN_SECONDS=120`, driven by [`load-test.sh`](./load-test.sh):
+
+- **1000-msg burst:** drains in ~100s, inside the SLO, so no scale-up.
+- **8000-msg burst:** the scaler flags *stalled* within one poll, learns ~9.9 msg/s per consumer, and asks for 10 (the partition cap). HPA steps 1 → 4 → 8 → 10 and the backlog clears about 2 minutes after the burst.
+- **After draining:** the produce rate is 0, so desired drops to 1, and HPA scales down after its 5-minute stabilization. No flapping in between.
+
+The full config, a timeline, and one rough edge this run exposed are in [docs/local-test.md](./docs/local-test.md).
 
 ---
 

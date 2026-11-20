@@ -1,61 +1,56 @@
-# Local Test: Persistent Lag Scaling in Action
+# Local Test: Trend Scaling in Action
 
-> **Historical run.** This documents the earlier "lag above `lagThreshold` for `sustainSeconds`" scaler, which has since been replaced by the trend/drain-time model (see [scaler/README.md](../scaler/README.md)). The config keys below no longer exist. Re-run `start.sh` + `load-test.sh` to get results for the current scaler.
-
-This documents the local run behind [`docs/test-results-annotated.png`](./test-results-annotated.png), showing the scaler ignoring a transient spike and reacting to a sustained one.
+This documents the local run behind [`docs/test-results-annotated.png`](./test-results-annotated.png). It shows the scaler ignoring a burst the consumer can absorb, reacting to one it can't, and scaling back down only once the produce rate says it's safe.
 
 ## Setup
 
-Deployed via the manifests under [`examples/k8s/`](../examples/k8s/): Kafka broker, a single consumer, the lag-scaler service, and a `ScaledObject` wired to it (see [`examples/k8s/scalers/persistent/scaledobject.yaml`](../examples/k8s/scalers/persistent/scaledobject.yaml)).
+Deployed on minikube with [`start.sh`](../start.sh): Kafka with `test-topic` at **10 partitions**, a single consumer (~10 msg/s: `ReadMessage` + 100ms sleep), the lag-scaler, and the `ScaledObject` in [`examples/k8s/scalers/persistent/scaledobject.yaml`](../examples/k8s/scalers/persistent/scaledobject.yaml) (`pollingInterval: 10`, `minReplicaCount: 1`, `maxReplicaCount: 10`).
 
-```yaml
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: kafka-consumer-scaler
-spec:
-  scaleTargetRef:
-    name: kafka-consumer
-  pollingInterval: 10
-  cooldownPeriod: 30
-  minReplicaCount: 1
-  maxReplicaCount: 10
-  triggers:
-    - type: external
-      metadata:
-        scalerAddress: lag-scaler.default.svc.cluster.local:50051
-        topic: test-topic
-        consumerGroup: sample-consumer-group
-        lagThreshold: "500"
-        sustainSeconds: "60"
-```
+Scaler settings, from [`examples/k8s/deploy/lag-scaler.yaml`](../examples/k8s/deploy/lag-scaler.yaml):
 
-| Parameter          | Value | Meaning in this run                                              |
-|---------------------|-------|--------------------------------------------------------------------|
-| `lagThreshold`      | 500   | Lag must exceed 500 messages before it's even considered high     |
-| `sustainSeconds`    | 60    | High lag must persist continuously for 60s before triggering scale-up |
-| `pollingInterval`   | 10    | KEDA asks the scaler for a fresh metric every 10s                 |
-| `cooldownPeriod`    | 30    | Wait 30s after the last high-lag reading before scaling back down |
-| `minReplicaCount`   | 1     | Consumer never scales below 1 replica                             |
-| `maxReplicaCount`   | 10    | Consumer never scales above 10 replicas                           |
+| Env var                | Value | Meaning in this run                                                    |
+|------------------------|-------|------------------------------------------------------------------------|
+| `MAX_DRAIN_SECONDS`    | 120   | Backlog must be projected to clear within 2 minutes                     |
+| `TREND_WINDOW_SECONDS` | 60    | Slope and rates are fitted over the last minute                         |
+| `MIN_LAG`              | 100   | Lag under 100 is noise                                                  |
+| `HEADROOM`             | 1.2   | Size for 20% more throughput than strictly needed                       |
+| `SAMPLING_INTERVAL`    | 10    | One scrape every 10s                                                    |
+| `MIN_CONSUMERS` / `MAX_CONSUMERS` | 1 / 10 | Clamp (10 is also the partition count)                    |
+
+Per-consumer capacity was **learned**, not configured.
 
 ## Load pattern
 
-Traffic was generated with [`load-test.sh`](../load-test.sh), which drives the consumer through two bursts:
+[`load-test.sh`](../load-test.sh) with defaults:
 
-1. **Phase 1 — moderate burst** (1000 messages, 64 bytes each): pushes lag just above `lagThreshold`, but the single consumer (~10 msg/s) drains it before `sustainSeconds` elapses.
-2. **60s wait** for lag to fully drain and KEDA to cool down.
-3. **Phase 2 — huge burst** (8000 messages, 64 bytes each): pushes far more lag than one consumer can drain within `sustainSeconds`.
+1. **Phase 1**: 1000 messages at once.
+2. **60s wait.**
+3. **Phase 2**: 8000 messages at once.
 
 ## What the graph shows
 
-Reading [`test-results-annotated.png`](./test-results-annotated.png) left to right:
+Red dashed = desired consumers reported to KEDA. Green = actual consumer-group size. Blue = total lag.
 
-1. **~10:40** — a small lag spike crosses the dashed threshold line but clears within seconds. Too short-lived to count as "persistent," so the scaler takes no action.
-2. **~10:42:30** — Phase 1's moderate burst pushes lag to ~8k, well above threshold.
-3. **~10:45** — lag has stayed above threshold long enough (`sustainSeconds: 60`) for the scaler to mark it persistent; consumer count steps from 1 to 10.
-4. **~10:46–10:48** — the extra consumers drain the backlog; lag returns to near zero.
-5. **~10:48:45** — Phase 2's huge burst hits, but since the consumer is already scaled up from the previous event, lag clears noticeably faster.
-6. **~10:54:30** — lag has stayed near zero past `cooldownPeriod`, so KEDA scales the consumer back down to `minReplicaCount`.
+1. **23:38:35, 1000-msg burst.** Lag jumps to ~1000 and falls at ~10/s, a ~100s drain inside the 120s SLO. The scaler stays at 1 consumer.
+2. **23:39:35, 8000-msg burst** (on top of ~500 left from phase 1). Within one poll the scaler logs:
+   `stalled=true lag=8343 consume=9.9/s drainETA=+Inf capacity=9.9/s consumers=1 desired=10`.
+   It learned ~9.9 msg/s per consumer from the saturated consumer and asked for 10, the partition cap.
+3. **23:39:40–23:40:10.** HPA steps 1 → 4 → 8 → 10 (its default scale-up rate). With 10 consumers draining at ~99 msg/s, the backlog is gone by **23:41:31**, about 2 minutes after the burst.
+4. **23:41:11.** Lag is falling well inside the SLO and the produce rate is 0, so desired drops to 1. It doesn't oscillate. The target comes from `produce rate / capacity`, not from "is lag high right now".
+5. **23:46:10.** HPA's default 5-minute scale-down stabilization expires and the consumer returns to 1.
 
-The key behavior: a threshold breach alone (step 1) never triggers scaling — only a breach that persists for `sustainSeconds` does (step 3).
+The **Consumers Stalled** panel marks the stretch where the scaler judged that consumers couldn't catch up.
+
+## Known rough edge seen in this run
+
+Phase 2 landed before phase 1's backlog dropped below `MIN_LAG`, so both bursts were one lag episode and the 8000-message jump went into the produce-rate fit (logged as `produce=114/s`). That inflated the computed need (≈22 before the clamp, versus ≈9 from the backlog alone). The partition cap hid it here. A robust slope estimator (e.g. Theil–Sen) for the produce rate would make one-off jumps like this count as backlog rather than sustained rate.
+
+## Reproduce
+
+```bash
+./start.sh
+./load-test.sh
+kubectl logs -l app=lag-scaler -f | grep GetMetrics
+```
+
+Grafana: `kubectl port-forward svc/grafana 3300:3000`, then open `http://localhost:3300` (the dashboard is the home page).

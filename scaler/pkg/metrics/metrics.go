@@ -129,6 +129,10 @@ func UpdateTrend(topic string, r lag.TrendResult) {
 
 	stateMu.Lock()
 	wasStalled, seen := lastStall[topic]
+	if !seen {
+		// Create the series at 0 so increase() sees the first stall.
+		activations.WithLabelValues(topic).Add(0)
+	}
 	lastStall[topic] = r.Stalled
 	stateMu.Unlock()
 
