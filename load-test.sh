@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 #
 # Drives the kafka-producer service through two bursts to demonstrate
-# persistent-lag scaling (see scaler/README.md, Step 4):
+# trend-based scaling (see scaler/README.md, Step 4). The single consumer does
+# ~10 msg/s (ReadMessage + 100ms sleep); the example lag-scaler deployment sets
+# MAX_DRAIN_SECONDS=120.
 #
-#   Phase 1 (moderate burst): pushes lag slightly above lagThreshold, but the
-#   single consumer (~10 msg/s: ReadMessage + 100ms sleep) drains it before
-#   sustainSeconds elapses. Expected: lag spikes then drops, no scale-up.
+#   Phase 1 (moderate burst): 1000 messages drain in ~100s, inside the 120s
+#   SLO. Expected: lag spikes then falls steadily, no scale-up.
 #
-#   Phase 2 (huge burst, after a cool-down wait): pushes far more lag than a
-#   single consumer can drain within sustainSeconds. Expected: lag stays
-#   above threshold long enough for the scaler to mark it persistent, and
-#   KEDA scales the consumer up.
+#   Phase 2 (huge burst, after a cool-down wait): 8000 messages would take
+#   ~800s for one consumer. Expected: once the trend window has seen the
+#   drain rate, the scaler marks consumers as stalled, learns ~10 msg/s per
+#   consumer, and reports enough consumers to drain within the SLO (capped at
+#   the partition count).
 #
 # Assumes start.sh has already stood up the environment and kafka-producer
 # is reachable in-cluster at http://kafka-producer/produce.
@@ -58,8 +60,8 @@ produce() {
 }
 
 echo "==> Phase 1: moderate burst ($MODERATE_COUNT messages, ${MESSAGE_SIZE}b each)"
-echo "    Expect: lag spikes just above threshold, drains before sustainSeconds"
-echo "    elapses -> no scale-up. Watch with:"
+echo "    Expect: lag spikes, then drains within MAX_DRAIN_SECONDS -> no scale-up."
+echo "    Watch with:"
 echo "      kubectl logs -l app=lag-scaler -f"
 echo "      kubectl get pods -l app=kafka-consumer -w"
 produce "$MODERATE_COUNT"
@@ -70,7 +72,7 @@ sleep "$WAIT_BETWEEN"
 
 echo
 echo "==> Phase 2: huge burst ($HUGE_COUNT messages, ${MESSAGE_SIZE}b each)"
-echo "    Expect: lag stays above threshold past sustainSeconds -> scale-up triggers."
+echo "    Expect: projected drain time exceeds MAX_DRAIN_SECONDS -> stalled -> scale-up."
 echo "    Watch with:"
 echo "      kubectl get pods -l app=kafka-consumer -w"
 produce "$HUGE_COUNT"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/config"
@@ -12,10 +13,21 @@ import (
 	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/metrics"
 )
 
+// MetricName is the external metric reported to KEDA. Its value is the
+// desired consumer count; with TargetSize 1, HPA's desired replicas equal it.
+const MetricName = "kafka_desired_consumers"
+
+// ErrNoData is returned by GetMetrics before the first scrape lands, so HPA
+// keeps the current replica count instead of acting on a made-up number.
+var ErrNoData = fmt.Errorf("no lag data collected yet")
+
 type ExternalScalerServer struct {
 	pb.UnimplementedExternalScalerServer
 	window *lag.SlidingWindow
 	config *config.ScalerConfig
+
+	mu    sync.Mutex
+	state lag.State
 }
 
 func New(window *lag.SlidingWindow, cfg *config.ScalerConfig) *ExternalScalerServer {
@@ -26,11 +38,9 @@ func New(window *lag.SlidingWindow, cfg *config.ScalerConfig) *ExternalScalerSer
 }
 
 func (s *ExternalScalerServer) IsActive(ctx context.Context, ref *pb.ScaledObjectRef) (*pb.IsActiveResponse, error) {
-	result := s.evaluate()
-	log.Printf("IsActive: persistent=%v, totalLag=%d", result.Persistent, result.TotalCurrentLag)
-	return &pb.IsActiveResponse{
-		Result: result.Persistent,
-	}, nil
+	r := s.evaluate()
+	log.Printf("IsActive: active=%v %s", r.Active, describe(r))
+	return &pb.IsActiveResponse{Result: r.Active}, nil
 }
 
 func (s *ExternalScalerServer) StreamIsActive(ref *pb.ScaledObjectRef, stream pb.ExternalScaler_StreamIsActiveServer) error {
@@ -42,12 +52,9 @@ func (s *ExternalScalerServer) StreamIsActive(ref *pb.ScaledObjectRef, stream pb
 		case <-stream.Context().Done():
 			return nil
 		case <-ticker.C:
-			result := s.evaluate()
-			log.Printf("StreamIsActive: persistent=%v, totalLag=%d", result.Persistent, result.TotalCurrentLag)
-			err := stream.Send(&pb.IsActiveResponse{
-				Result: result.Persistent,
-			})
-			if err != nil {
+			r := s.evaluate()
+			log.Printf("StreamIsActive: active=%v %s", r.Active, describe(r))
+			if err := stream.Send(&pb.IsActiveResponse{Result: r.Active}); err != nil {
 				return fmt.Errorf("error sending stream: %w", err)
 			}
 		}
@@ -56,37 +63,37 @@ func (s *ExternalScalerServer) StreamIsActive(ref *pb.ScaledObjectRef, stream pb
 
 func (s *ExternalScalerServer) GetMetricSpec(ctx context.Context, ref *pb.ScaledObjectRef) (*pb.GetMetricSpecResponse, error) {
 	return &pb.GetMetricSpecResponse{
-		MetricSpecs: []*pb.MetricSpec{
-			{
-				MetricName: "persistent_kafka_lag",
-				TargetSize: s.config.LagThreshold,
-			},
-		},
+		MetricSpecs: []*pb.MetricSpec{{MetricName: MetricName, TargetSize: 1}},
 	}, nil
 }
 
 func (s *ExternalScalerServer) GetMetrics(ctx context.Context, req *pb.GetMetricsRequest) (*pb.GetMetricsResponse, error) {
-	result := s.evaluate()
-
-	var metricValue int64
-	if result.Persistent {
-		metricValue = result.TotalCurrentLag
+	if s.window.Len() == 0 {
+		return nil, ErrNoData
 	}
-
-	log.Printf("GetMetrics: persistent=%v, metricValue=%d", result.Persistent, metricValue)
+	r := s.evaluate()
+	log.Printf("GetMetrics: desired=%d %s", r.Desired, describe(r))
 	return &pb.GetMetricsResponse{
-		MetricValues: []*pb.MetricValue{
-			{
-				MetricName:  "persistent_kafka_lag",
-				MetricValue: metricValue,
-			},
-		},
+		MetricValues: []*pb.MetricValue{{MetricName: MetricName, MetricValue: r.Desired}},
 	}, nil
 }
 
-func (s *ExternalScalerServer) evaluate() lag.EvaluationResult {
-	samples := s.window.Snapshot()
-	result := lag.EvaluatePersistence(samples, s.config.LagThreshold, s.config.SustainDuration)
-	metrics.UpdateActive(s.config.Topic, result.Persistent)
-	return result
+func (s *ExternalScalerServer) evaluate() lag.TrendResult {
+	batches := s.window.Snapshot()
+
+	s.mu.Lock()
+	r := lag.EvaluateTrend(batches, s.config.TrendParams(), s.state)
+	s.state = r.State
+	s.mu.Unlock()
+
+	metrics.UpdateTrend(s.config.Topic, r)
+	return r
+}
+
+func describe(r lag.TrendResult) string {
+	if r.WarmingUp {
+		return fmt.Sprintf("warmingUp lag=%d consumers=%d desired=%d", r.Lag, r.Consumers, r.Desired)
+	}
+	return fmt.Sprintf("stalled=%v lag=%d slope=%.1f/s produce=%.1f/s consume=%.1f/s drainETA=%.0fs capacity=%.1f/s consumers=%d desired=%d",
+		r.Stalled, r.Lag, r.LagSlope, r.ProduceRate, r.ConsumeRate, r.DrainETA, r.State.Rate, r.Consumers, r.Desired)
 }

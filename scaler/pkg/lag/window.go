@@ -5,48 +5,47 @@ import (
 	"time"
 )
 
+// SlidingWindow keeps the batches scraped within the last `duration`.
 type SlidingWindow struct {
-	mu             sync.RWMutex
-	samples        []LagSample
-	windowDuration time.Duration
+	mu       sync.RWMutex
+	batches  []Batch
+	duration time.Duration
 }
 
-func NewSlidingWindow(windowSize int, samplingInterval time.Duration) *SlidingWindow {
-	return &SlidingWindow{
-		windowDuration: time.Duration(windowSize) * samplingInterval,
-	}
+func NewSlidingWindow(duration time.Duration) *SlidingWindow {
+	return &SlidingWindow{duration: duration}
 }
 
-func (w *SlidingWindow) Add(samples ...LagSample) {
+func (w *SlidingWindow) Add(batches ...Batch) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	w.samples = append(w.samples, samples...)
+	w.batches = append(w.batches, batches...)
 	w.evict()
 }
 
-func (w *SlidingWindow) Snapshot() []LagSample {
+func (w *SlidingWindow) Snapshot() []Batch {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	out := make([]LagSample, len(w.samples))
-	copy(out, w.samples)
+	out := make([]Batch, len(w.batches))
+	copy(out, w.batches)
 	return out
 }
 
 func (w *SlidingWindow) Len() int {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	return len(w.samples)
+	return len(w.batches)
 }
 
 func (w *SlidingWindow) evict() {
-	cutoff := time.Now().Add(-w.windowDuration)
+	cutoff := time.Now().Add(-w.duration)
 	i := 0
-	for i < len(w.samples) && w.samples[i].Timestamp.Before(cutoff) {
+	for i < len(w.batches) && w.batches[i].Timestamp.Before(cutoff) {
 		i++
 	}
 	if i > 0 {
-		w.samples = w.samples[i:]
+		w.batches = w.batches[i:]
 	}
 }

@@ -1,6 +1,23 @@
-# Persistent Kafka Lag Scaler
+# Kafka Lag Trend Scaler
 
-A standalone gRPC service that implements [KEDA's External Scaler protocol](https://keda.sh/docs/latest/concepts/external-scalers/) to scale Kafka consumers based on **persistent lag** — lag that exceeds a threshold continuously for a configured duration — rather than reacting to momentary spikes.
+A standalone gRPC service that implements [KEDA's External Scaler protocol](https://keda.sh/docs/latest/concepts/external-scalers/) to scale Kafka consumers on one question: **can the current consumers drain the backlog in time?** It doesn't scale on how big lag is, or how long it has been high. It fits a trend to lag over a short window, projects when the backlog will drain, and scales only when that projection misses an SLO. It then reports how many consumers are needed, using per-consumer throughput it learns from the group itself.
+
+## How it decides
+
+Every `SAMPLING_INTERVAL` the scraper records one batch per topic: total lag, Σ committed offsets, Σ end offsets, partition count, and consumer-group size. On each KEDA poll, over the last `TREND_WINDOW_SECONDS`:
+
+1. **Fit the trend.** Least-squares slopes give `lagSlope`, the produce rate `P` (slope of end offsets) and the consume rate `C` (slope of committed offsets).
+2. **Project drain time.** `drainETA = lag / -lagSlope`. If lag isn't falling, it's infinite.
+3. **Stalled** = `lag >= MIN_LAG` and `drainETA > MAX_DRAIN_SECONDS`. This covers lag that is flat, rising, or falling too slowly.
+4. **Learn capacity.** If lag stayed above `MIN_LAG` for the whole window and the consumer count didn't change, the consumers were saturated, so `C / consumers` is their real throughput. It's smoothed with an EWMA (`CAPACITY_SMOOTHING`). `PER_CONSUMER_RATE` overrides this.
+5. **Size the group.** `need = ceil(HEADROOM × (P + lag / MAX_DRAIN_SECONDS) / capacity)`.
+   - stalled → `max(need, consumers + 1)`: always step up.
+   - healthy → `min(need, consumers)`: never scale up, but scale down when the produce rate drops.
+   - clamped to `[MIN_CONSUMERS, min(MAX_CONSUMERS, partitions)]`.
+
+The fit only covers batches with the same partition and consumer count as the latest one. While lag is above `MIN_LAG`, it also only covers the current lag episode. So a rebalance, a partition change, or the instant jump of a burst never gets mistaken for a trend. Until the segment spans about 80% of the window (and has at least `MIN_SAMPLES` batches), the scaler is **warming up** and reports the current consumer count.
+
+Why it doesn't flap: after scaling up, lag falls and *stalled* clears. But the desired count is still `P / capacity`, the real steady-state requirement, so replicas hold instead of dropping back.
 
 ## Prerequisites
 
@@ -11,15 +28,23 @@ A standalone gRPC service that implements [KEDA's External Scaler protocol](http
 
 ## Configuration
 
+The running scaler reads its configuration from **environment variables** on the `lag-scaler` Deployment (`examples/k8s/deploy/lag-scaler.yaml`). The metadata keys are what `config.ParseFromMetadata` accepts, but trigger metadata from the ScaledObject isn't wired into the running server yet.
+
 | Environment Variable | Metadata Key | Description | Default |
 |---|---|---|---|
 | `KAFKA_BROKERS` | `bootstrapServers` | Kafka broker addresses | `localhost:9092` |
 | `KAFKA_TOPIC` | `topic` | Topic to monitor | *(required)* |
 | `KAFKA_GROUP_ID` | `consumerGroup` | Consumer group to track | *(required)* |
-| `LAG_THRESHOLD` | `lagThreshold` | Lag count above which a partition is considered "lagging" | `500` |
-| `SUSTAIN_SECONDS` | `sustainSeconds` | How long lag must stay above threshold before scaling triggers | `120` |
 | `SAMPLING_INTERVAL` | `samplingInterval` | Seconds between each lag poll | `10` |
-| `WINDOW_SIZE` | `windowSize` | Number of samples to keep in the sliding window | `30` |
+| `MAX_DRAIN_SECONDS` | `maxDrainSeconds` | The SLO: backlog must be projected to drain within this. Lower = more aggressive | `300` |
+| `TREND_WINDOW_SECONDS` | `trendWindowSeconds` | History used for the slope/rate fit. Longer = steadier but slower to react. Must be ≥ 2× sampling interval | `120` |
+| `MIN_LAG` | `minLag` | Lag below this is ignored (never stalled, scaler inactive). Set above your normal in-flight/commit-batch lag | `100` |
+| `HEADROOM` | `headroom` | Multiplier on required throughput when sizing | `1.2` |
+| `PER_CONSUMER_RATE` | `perConsumerRate` | Fixed msgs/sec per consumer. Unset = learn it while consumers are saturated | *(learned)* |
+| `CAPACITY_SMOOTHING` | `capacitySmoothing` | EWMA alpha for learned capacity, `(0, 1]`. Higher = trusts the latest window more | `0.3` |
+| `MIN_CONSUMERS` | `minConsumers` | Lower bound on reported consumers | `1` |
+| `MAX_CONSUMERS` | `maxConsumers` | Upper bound on reported consumers. `0` = partition count (never above it either way) | `0` |
+| `MIN_SAMPLES` | `minSamples` | Minimum batches in the window before deciding | `6` |
 | `GRPC_PORT` | — | Port for the gRPC server | `50051` |
 | `METRICS_PORT` | — | Port for the Prometheus `/metrics` endpoint | `9090` |
 
@@ -30,13 +55,7 @@ cd scaler
 make test
 ```
 
-Expected output:
-
-```
-ok  github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/lag  0.5s
-```
-
-All 7 evaluator test cases should pass (no samples, below threshold, short stretch, exact duration, long stretch, gap in middle, multi-partition).
+All packages should report `ok`. `pkg/lag/trend_test.go` covers the core cases: rising, flat, fast-drain, slow-drain, burst jumps, capacity learning, scale-down, clamps, rebalances, partition changes, and offset resets.
 
 ## Step 2: Start the Environment
 
@@ -87,17 +106,18 @@ kubectl logs -l app=lag-scaler -f
 You should see output like:
 
 ```
-Starting persistent Kafka lag scaler
-  Brokers:          kafka.default.svc.cluster.local:9092
-  Topic:            test-topic
-  Consumer Group:   sample-consumer-group
-  Lag Threshold:    500
-  Sustain Duration: 2m0s
-  Sampling Interval:10s
-  Window Size:      30
+Starting Kafka lag trend scaler
+  Brokers:            kafka.default.svc.cluster.local:9092
+  Topic:              test-topic
+  Consumer Group:     sample-consumer-group
+  Sampling Interval:  10s
+  Trend Window:       1m0s
+  Max Drain (SLO):    2m0s
+  Min Lag:            100
+  ...
 gRPC server listening on :50051
-Collected 3 lag samples (window size: 3)
-Collected 3 lag samples (window size: 6)
+Collected batch: partitions=3 consumers=1 (window: 1 batches)
+Collected batch: partitions=3 consumers=1 (window: 2 batches)
 ```
 
 ### Verify the service is reachable
@@ -124,7 +144,7 @@ NAME                     SCALETARGETREF   MIN   MAX   TRIGGERS   ...   READY   A
 kafka-consumer-scaler    kafka-consumer   1     5     external   ...   True    False
 ```
 
-`READY=True` means KEDA is successfully talking to the scaler. `ACTIVE=False` means no persistent lag is detected (expected at rest).
+`READY=True` means KEDA is successfully talking to the scaler. `ACTIVE=False` means lag is below `MIN_LAG` (expected at rest).
 
 You can also check KEDA's operator logs:
 
@@ -155,10 +175,10 @@ kubectl logs -l app=lag-scaler -f
 
 You should see:
 
-1. **Lag samples climbing** — `Collected N lag samples` with the window growing
-2. **`IsActive: persistent=false`** — lag is above threshold but hasn't persisted long enough yet
-3. After ~2 minutes of sustained lag: **`IsActive: persistent=true`** — scaling triggers
-4. **`GetMetrics: persistent=true, metricValue=<total_lag>`** — KEDA receives the lag value
+1. **`warmingUp lag=... desired=1`** — a new lag episode started; the scaler holds the current count until the window has enough of it
+2. **`stalled=true ... drainETA=+Infs`** (or an ETA above `MAX_DRAIN_SECONDS`) — the consumers can't drain in time
+3. **`capacity=10.0/s`** — learned per-consumer throughput while saturated
+4. **`GetMetrics: desired=N`** — the consumer count KEDA/HPA scales to
 
 ### Watch the consumer scale
 
@@ -166,18 +186,20 @@ You should see:
 kubectl get pods -l app=kafka-consumer -w
 ```
 
-You should see replicas stay at 1 during the initial burst, and only scale up after the sustain duration (default 2 minutes). Compare this with the threshold-based scaler (`examples/k8s/scalers/basic/scaledobject.yaml`) which would scale up almost immediately.
+A burst that the current consumers drain within the SLO never scales. One they can't drain scales straight to the computed count, up to the partition count. Compare this with the threshold-based scaler (`examples/k8s/scalers/basic/scaledobject.yaml`), which scales on any lag over 10.
 
 ### After lag clears
 
-Once the consumers drain the backlog, the scaler will report `persistent=false` and `metricValue=0`. After the `cooldownPeriod` (30s), KEDA will scale back down to `minReplicaCount: 1`.
+`stalled` goes back to `false`, but the desired count tracks `HEADROOM × produce rate / capacity`. Replicas only come down when the produce rate actually drops (subject to HPA's scale-down stabilization).
 
 ## Observability
 
-`start.sh` deploys Prometheus and Grafana alongside the rest of the infra. Grafana comes pre-provisioned with a "Kafka Persistent Lag Scaler" dashboard with two panels:
+`start.sh` deploys Prometheus and Grafana alongside the rest of the infra. Grafana comes pre-provisioned with a "Kafka Lag Trend Scaler" dashboard:
 
-- **Consumer Lag** — `kafka_lag_scaler_total_lag`, the summed lag across all partitions of the monitored topic
-- **Consumer Count** — `kafka_lag_scaler_consumer_count`, the number of active members in the consumer group
+- **Consumer Count vs. Lag** — `kafka_lag_scaler_total_lag`, `kafka_lag_scaler_consumer_count`, and `kafka_lag_scaler_desired_consumers` (what the scaler asked for)
+- **Consumers Stalled** — a bar each time `kafka_lag_scaler_activations_total` ticks (a healthy → stalled transition)
+
+The scaler also exports what's behind each decision: `kafka_lag_scaler_lag_slope`, `_produce_rate`, `_consume_rate`, `_drain_eta_seconds`, `_consumer_capacity`, `_stalled`, `_warming_up`, `_active`, and per-partition lag.
 
 Open it with:
 
@@ -185,7 +207,7 @@ Open it with:
 minikube service grafana --url
 ```
 
-The scaler itself exposes these (and per-partition lag) at `/metrics` on port `9090`.
+All of these are served at `/metrics` on port `9090`.
 
 ## Running Locally (outside Kubernetes)
 
@@ -195,8 +217,8 @@ For development/debugging, you can run the scaler directly:
 KAFKA_BROKERS="localhost:9092" \
 KAFKA_TOPIC="test-topic" \
 KAFKA_GROUP_ID="sample-consumer-group" \
-LAG_THRESHOLD="500" \
-SUSTAIN_SECONDS="120" \
+MAX_DRAIN_SECONDS="300" \
+TREND_WINDOW_SECONDS="120" \
 go run main.go
 ```
 
@@ -227,11 +249,11 @@ scaler/
     config/config.go            # ScalerConfig: parse from metadata or env vars
     kafka/client.go             # LagFetcher: per-partition lag + consumer group size via kafka-go Client API
     lag/
-      sample.go                 # LagSample type
-      window.go                 # SlidingWindow: thread-safe, time-based eviction
-      evaluator.go              # EvaluatePersistence: core algorithm
-      evaluator_test.go         # Unit tests (7 cases)
+      sample.go                 # LagSample (per partition) and Batch (per scrape) types
+      window.go                 # SlidingWindow of batches: thread-safe, time-based eviction
+      trend.go                  # EvaluateTrend: slope fit, drain ETA, capacity learning, sizing
+      trend_test.go             # Unit tests
     metrics/metrics.go          # Prometheus gauges + /metrics HTTP handler
     scraper/scraper.go          # Background goroutine: periodic lag + consumer count collection
-    server/server.go            # gRPC ExternalScalerServer (IsActive, StreamIsActive, GetMetricSpec, GetMetrics)
+    server/server.go            # gRPC ExternalScalerServer; holds learned capacity across polls
 ```
