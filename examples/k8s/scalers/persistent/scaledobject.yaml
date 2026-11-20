@@ -17,5 +17,7 @@ spec:
         scalerAddress: lag-scaler.default.svc.cluster.local:50051
         topic: test-topic
         consumerGroup: sample-consumer-group
-        lagThreshold: "500"
-        sustainSeconds: "60"
+        # The scaler reports the desired consumer count as the metric value
+        # (target 1), so HPA's desired replicas equal it. Tuning knobs
+        # (maxDrainSeconds, trendWindowSeconds, ...) are set as env vars on the
+        # lag-scaler Deployment, not here.

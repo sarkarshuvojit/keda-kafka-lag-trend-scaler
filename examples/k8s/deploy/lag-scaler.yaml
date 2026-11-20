@@ -30,14 +30,21 @@ spec:
               value: "test-topic"
             - name: KAFKA_GROUP_ID
               value: "sample-consumer-group"
-            - name: LAG_THRESHOLD
-              value: "500"
-            - name: SUSTAIN_SECONDS
-              value: "120"
+            # Trend tuning. See scaler/README.md for what each knob does.
             - name: SAMPLING_INTERVAL
               value: "10"
-            - name: WINDOW_SIZE
-              value: "30"
+            - name: TREND_WINDOW_SECONDS
+              value: "60"
+            - name: MAX_DRAIN_SECONDS
+              value: "120"
+            - name: MIN_LAG
+              value: "100"
+            - name: HEADROOM
+              value: "1.2"
+            - name: MIN_CONSUMERS
+              value: "1"
+            - name: MAX_CONSUMERS
+              value: "10"
           resources:
             requests:
               cpu: 100m

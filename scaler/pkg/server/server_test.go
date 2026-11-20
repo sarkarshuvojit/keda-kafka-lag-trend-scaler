@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -12,13 +13,17 @@ import (
 
 func defaultConfig() *config.ScalerConfig {
 	return &config.ScalerConfig{
-		BootstrapServers: "localhost:9092",
-		Topic:            "test-topic",
-		ConsumerGroup:    "test-group",
-		LagThreshold:     500,
-		SustainDuration:  120 * time.Second,
-		SamplingInterval: 10 * time.Second,
-		WindowSize:       30,
+		BootstrapServers:  "localhost:9092",
+		Topic:             "test-topic",
+		ConsumerGroup:     "test-group",
+		SamplingInterval:  10 * time.Second,
+		MinLag:            100,
+		MaxDrain:          300 * time.Second,
+		TrendWindow:       120 * time.Second,
+		Headroom:          1.0,
+		CapacitySmoothing: 1.0,
+		MinConsumers:      1,
+		MinSamples:        6,
 	}
 }
 
@@ -26,240 +31,145 @@ func ref() *pb.ScaledObjectRef {
 	return &pb.ScaledObjectRef{Name: "test", Namespace: "default"}
 }
 
-// simulateScraper mimics what the real scraper does: adds samples to the
-// window one tick at a time, just like the production code path.
-func simulateScraper(w *lag.SlidingWindow, start time.Time, interval time.Duration, ticks int, partitions int, lagPerPartition int64) {
-	for i := range ticks {
-		ts := start.Add(time.Duration(i) * interval)
+func newServer(cfg *config.ScalerConfig) (*ExternalScalerServer, *lag.SlidingWindow) {
+	w := lag.NewSlidingWindow(cfg.WindowDuration())
+	return New(w, cfg), w
+}
+
+// scrape mimics the real scraper: one scrape every 10s, ending now, with
+// `partitions` partitions sharing produce/consume rates evenly.
+func scrape(w *lag.SlidingWindow, d time.Duration, partitions, consumers int, initialLag int64, produce, consume float64) {
+	start := time.Now().Add(-d)
+	for t := time.Duration(0); t <= d; t += 10 * time.Second {
+		ts := start.Add(t)
+		var samples []lag.LagSample
 		for p := range partitions {
-			w.Add(lag.LagSample{
-				Timestamp: ts,
-				Partition: p,
-				Lag:       lagPerPartition,
-				Topic:     "test-topic",
+			end := 1000 + initialLag/int64(partitions) + int64(produce*t.Seconds())/int64(partitions)
+			committed := 1000 + int64(consume*t.Seconds())/int64(partitions)
+			committed = min(committed, end)
+			samples = append(samples, lag.LagSample{
+				Timestamp: ts, Topic: "test-topic", Partition: p,
+				Lag: end - committed, Offset: committed, EndOffset: end,
 			})
 		}
+		w.Add(lag.NewBatch(samples, consumers))
 	}
 }
 
-func TestIsActive_EmptyWindow(t *testing.T) {
-	cfg := defaultConfig()
-	w := lag.NewSlidingWindow(cfg.WindowSize, cfg.SamplingInterval)
-	srv := New(w, cfg)
+func desired(t *testing.T, srv *ExternalScalerServer) int64 {
+	t.Helper()
+	resp, err := srv.GetMetrics(context.Background(), &pb.GetMetricsRequest{ScaledObjectRef: ref(), MetricName: MetricName})
+	if err != nil {
+		t.Fatalf("GetMetrics: %v", err)
+	}
+	if len(resp.MetricValues) != 1 || resp.MetricValues[0].MetricName != MetricName {
+		t.Fatalf("unexpected metric values: %+v", resp.MetricValues)
+	}
+	return resp.MetricValues[0].MetricValue
+}
 
+func isActive(t *testing.T, srv *ExternalScalerServer) bool {
+	t.Helper()
 	resp, err := srv.IsActive(context.Background(), ref())
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("IsActive: %v", err)
 	}
-	if resp.Result {
-		t.Error("expected inactive with empty window")
-	}
+	return resp.Result
 }
 
-func TestIsActive_LagBelowThreshold(t *testing.T) {
-	cfg := defaultConfig()
-	w := lag.NewSlidingWindow(cfg.WindowSize, cfg.SamplingInterval)
-	srv := New(w, cfg)
-
-	// 3 minutes of lag at 100 (below threshold of 500)
-	simulateScraper(w, time.Now().Add(-3*time.Minute), cfg.SamplingInterval, 18, 3, 100)
-
-	resp, err := srv.IsActive(context.Background(), ref())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp.Result {
-		t.Error("expected inactive when lag is below threshold")
-	}
-}
-
-func TestIsActive_HighLagButTooShort(t *testing.T) {
-	cfg := defaultConfig()
-	w := lag.NewSlidingWindow(cfg.WindowSize, cfg.SamplingInterval)
-	srv := New(w, cfg)
-
-	// Only 1 minute of high lag (sustain requires 2 minutes)
-	simulateScraper(w, time.Now().Add(-1*time.Minute), cfg.SamplingInterval, 6, 3, 1000)
-
-	resp, err := srv.IsActive(context.Background(), ref())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp.Result {
-		t.Error("expected inactive when high lag hasn't persisted long enough")
-	}
-}
-
-func TestIsActive_PersistentHighLag(t *testing.T) {
-	cfg := defaultConfig()
-	w := lag.NewSlidingWindow(cfg.WindowSize, cfg.SamplingInterval)
-	srv := New(w, cfg)
-
-	// 3 minutes of high lag (sustain requires 2 minutes)
-	simulateScraper(w, time.Now().Add(-3*time.Minute), cfg.SamplingInterval, 18, 3, 1000)
-
-	resp, err := srv.IsActive(context.Background(), ref())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !resp.Result {
-		t.Error("expected ACTIVE when lag has persisted beyond sustain duration")
-	}
-}
-
-func TestIsActive_LagAtExactThreshold(t *testing.T) {
-	cfg := defaultConfig()
-	w := lag.NewSlidingWindow(cfg.WindowSize, cfg.SamplingInterval)
-	srv := New(w, cfg)
-
-	// 3 minutes of lag at exactly the threshold (500)
-	simulateScraper(w, time.Now().Add(-3*time.Minute), cfg.SamplingInterval, 18, 3, 500)
-
-	resp, err := srv.IsActive(context.Background(), ref())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// Lag == threshold should count as persistent (>= not >)
-	if !resp.Result {
-		t.Error("expected ACTIVE when lag equals threshold for sustained period")
-	}
-}
-
-func TestIsActive_GapBreaksPersistence(t *testing.T) {
-	cfg := defaultConfig()
-	w := lag.NewSlidingWindow(cfg.WindowSize, cfg.SamplingInterval)
-	srv := New(w, cfg)
-
-	now := time.Now()
-
-	// 1 minute of high lag
-	simulateScraper(w, now.Add(-3*time.Minute), cfg.SamplingInterval, 6, 3, 1000)
-
-	// Then a dip below threshold at the 70s mark
-	for p := range 3 {
-		w.Add(lag.LagSample{
-			Timestamp: now.Add(-3*time.Minute + 60*time.Second),
-			Partition: p, Lag: 100, Topic: "test-topic",
-		})
-	}
-
-	// Then another minute of high lag
-	simulateScraper(w, now.Add(-3*time.Minute+70*time.Second), cfg.SamplingInterval, 6, 3, 1000)
-
-	resp, err := srv.IsActive(context.Background(), ref())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp.Result {
-		t.Error("expected inactive when a gap breaks the persistent stretch")
-	}
-}
-
-func TestGetMetrics_ReturnsLagWhenPersistent(t *testing.T) {
-	cfg := defaultConfig()
-	w := lag.NewSlidingWindow(cfg.WindowSize, cfg.SamplingInterval)
-	srv := New(w, cfg)
-
-	// 3 minutes of lag=1000 across 3 partitions
-	simulateScraper(w, time.Now().Add(-3*time.Minute), cfg.SamplingInterval, 18, 3, 1000)
-
-	resp, err := srv.GetMetrics(context.Background(), &pb.GetMetricsRequest{
-		ScaledObjectRef: ref(),
-		MetricName:      "persistent_kafka_lag",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(resp.MetricValues) != 1 {
-		t.Fatalf("expected 1 metric value, got %d", len(resp.MetricValues))
-	}
-
-	mv := resp.MetricValues[0]
-	if mv.MetricName != "persistent_kafka_lag" {
-		t.Errorf("metric name = %s", mv.MetricName)
-	}
-	// 3 partitions * 1000 lag each = 3000 total
-	if mv.MetricValue != 3000 {
-		t.Errorf("expected metric value 3000, got %d", mv.MetricValue)
-	}
-}
-
-func TestGetMetrics_ReturnsZeroWhenNotPersistent(t *testing.T) {
-	cfg := defaultConfig()
-	w := lag.NewSlidingWindow(cfg.WindowSize, cfg.SamplingInterval)
-	srv := New(w, cfg)
-
-	// Short burst — not persistent
-	simulateScraper(w, time.Now().Add(-30*time.Second), cfg.SamplingInterval, 3, 3, 1000)
-
-	resp, err := srv.GetMetrics(context.Background(), &pb.GetMetricsRequest{
-		ScaledObjectRef: ref(),
-		MetricName:      "persistent_kafka_lag",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if resp.MetricValues[0].MetricValue != 0 {
-		t.Errorf("expected metric value 0 when not persistent, got %d", resp.MetricValues[0].MetricValue)
-	}
-}
-
-func TestGetMetricSpec_ReturnsThreshold(t *testing.T) {
-	cfg := defaultConfig()
-	cfg.LagThreshold = 750
-	w := lag.NewSlidingWindow(cfg.WindowSize, cfg.SamplingInterval)
-	srv := New(w, cfg)
-
+func TestGetMetricSpec(t *testing.T) {
+	srv, _ := newServer(defaultConfig())
 	resp, err := srv.GetMetricSpec(context.Background(), ref())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	if len(resp.MetricSpecs) != 1 {
-		t.Fatalf("expected 1 metric spec, got %d", len(resp.MetricSpecs))
-	}
-	if resp.MetricSpecs[0].MetricName != "persistent_kafka_lag" {
-		t.Errorf("metric name = %s", resp.MetricSpecs[0].MetricName)
-	}
-	if resp.MetricSpecs[0].TargetSize != 750 {
-		t.Errorf("target size = %d, want 750", resp.MetricSpecs[0].TargetSize)
+	if len(resp.MetricSpecs) != 1 || resp.MetricSpecs[0].MetricName != MetricName || resp.MetricSpecs[0].TargetSize != 1 {
+		t.Errorf("unexpected spec: %+v", resp.MetricSpecs)
 	}
 }
 
-func TestIsActive_RealisticScraperSimulation(t *testing.T) {
-	// Simulates exactly what happens in production:
-	// scraper adds samples every 10s, KEDA polls IsActive periodically
+func TestGetMetrics_NoDataIsError(t *testing.T) {
+	srv, _ := newServer(defaultConfig())
+	_, err := srv.GetMetrics(context.Background(), &pb.GetMetricsRequest{ScaledObjectRef: ref(), MetricName: MetricName})
+	if !errors.Is(err, ErrNoData) {
+		t.Fatalf("expected ErrNoData, got %v", err)
+	}
+}
+
+func TestIsActive_EmptyWindow(t *testing.T) {
+	srv, _ := newServer(defaultConfig())
+	if isActive(t, srv) {
+		t.Error("expected inactive with empty window")
+	}
+}
+
+func TestIsActive_FollowsMinLag(t *testing.T) {
+	srv, w := newServer(defaultConfig())
+	scrape(w, 2*time.Minute, 3, 1, 30, 10, 10)
+	if isActive(t, srv) {
+		t.Error("expected inactive when lag is below minLag")
+	}
+
+	srv, w = newServer(defaultConfig())
+	scrape(w, 2*time.Minute, 3, 1, 3000, 10, 10)
+	if !isActive(t, srv) {
+		t.Error("expected active when lag is above minLag")
+	}
+}
+
+func TestGetMetrics_WarmingUpHoldsCurrent(t *testing.T) {
+	srv, w := newServer(defaultConfig())
+	scrape(w, 30*time.Second, 6, 2, 5000, 100, 10)
+	if got := desired(t, srv); got != 2 {
+		t.Errorf("desired = %d, want 2 (hold during warm-up)", got)
+	}
+}
+
+func TestGetMetrics_FastDrainDoesNotScale(t *testing.T) {
+	// A burst that one consumer drains well within the SLO.
+	srv, w := newServer(defaultConfig())
+	scrape(w, 2*time.Minute, 6, 1, 3000, 0, 20)
+	if got := desired(t, srv); got != 1 {
+		t.Errorf("desired = %d, want 1", got)
+	}
+}
+
+func TestGetMetrics_CantCatchUpScalesToNeed(t *testing.T) {
+	// One consumer doing 10 msg/s against 60 msg/s produce, 12 partitions.
+	// Learned capacity 10 -> need ≈ (60 + ~7000/300) / 10 ≈ 9.
+	srv, w := newServer(defaultConfig())
+	scrape(w, 2*time.Minute, 12, 1, 1000, 60, 10)
+	got := desired(t, srv)
+	if got < 8 || got > 10 {
+		t.Errorf("desired = %d, want ~9", got)
+	}
+	if srv.state.Rate < 9 || srv.state.Rate > 11 {
+		t.Errorf("learned capacity = %f, want ~10", srv.state.Rate)
+	}
+}
+
+func TestGetMetrics_CapacityPersistsAcrossEvaluations(t *testing.T) {
+	// Learn capacity while stalled, then after scale-up keep the replica count
+	// while draining instead of flapping back down.
 	cfg := defaultConfig()
-	w := lag.NewSlidingWindow(cfg.WindowSize, cfg.SamplingInterval)
-	srv := New(w, cfg)
+	srv, w := newServer(cfg)
+	scrape(w, 2*time.Minute, 12, 1, 1000, 60, 10)
+	_ = desired(t, srv)
 
-	now := time.Now()
-	partitions := 3
-
-	// Simulate 3 minutes of scraper ticks with high lag
-	for tick := range 19 { // 0s to 180s
-		ts := now.Add(-3*time.Minute + time.Duration(tick)*cfg.SamplingInterval)
-		for p := range partitions {
-			w.Add(lag.LagSample{
-				Timestamp: ts,
-				Topic:     "test-topic",
-				Partition: p,
-				Lag:       2000,
-				Offset:    int64(tick * 10),
-				EndOffset: int64(tick*10 + 2000),
-			})
-		}
+	w2 := lag.NewSlidingWindow(cfg.WindowDuration())
+	srv.window = w2
+	scrape(w2, 2*time.Minute, 12, 8, 5000, 60, 80)
+	// need = (60 + ~2600/300) / 10 ≈ 6.9 -> 7: trimmed to what the produce
+	// rate needs, not collapsed back to 1 just because lag is now falling.
+	if got := desired(t, srv); got != 7 {
+		t.Errorf("desired = %d, want 7 after scale-up", got)
 	}
+}
 
-	// Now IsActive should return true
-	resp, err := srv.IsActive(context.Background(), ref())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !resp.Result {
-		snap := w.Snapshot()
-		t.Errorf("expected ACTIVE after 3 minutes of high lag; window has %d samples", len(snap))
+func TestGetMetrics_ClampedToPartitions(t *testing.T) {
+	srv, w := newServer(defaultConfig())
+	scrape(w, 2*time.Minute, 4, 1, 1000, 500, 10)
+	if got := desired(t, srv); got != 4 {
+		t.Errorf("desired = %d, want 4 (partition count)", got)
 	}
 }

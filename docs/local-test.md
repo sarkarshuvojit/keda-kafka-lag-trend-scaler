@@ -1,5 +1,7 @@
 # Local Test: Persistent Lag Scaling in Action
 
+> **Historical run.** This documents the earlier "lag above `lagThreshold` for `sustainSeconds`" scaler, which has since been replaced by the trend/drain-time model (see [scaler/README.md](../scaler/README.md)). The config keys below no longer exist. Re-run `start.sh` + `load-test.sh` to get results for the current scaler.
+
 This documents the local run behind [`docs/test-results-annotated.png`](./test-results-annotated.png), showing the scaler ignoring a transient spike and reacting to a sustained one.
 
 ## Setup

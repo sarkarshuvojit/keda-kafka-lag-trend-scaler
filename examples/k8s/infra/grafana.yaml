@@ -68,7 +68,7 @@ data:
           path: /etc/grafana/provisioning/dashboards
   lag-scaler.json: |
     {
-      "title": "Kafka Persistent Lag Scaler",
+      "title": "Kafka Lag Trend Scaler",
       "uid": "lag-scaler",
       "timezone": "browser",
       "refresh": "10s",
@@ -122,16 +122,16 @@ data:
                 ]
               },
               {
-                "matcher": { "id": "byName", "options": "Scaling Threshold" },
+                "matcher": { "id": "byName", "options": "Desired Consumers" },
                 "properties": [
-                  { "id": "custom.axisPlacement", "value": "right" },
-                  { "id": "custom.axisLabel", "value": "Consumer Lag" },
-                  { "id": "custom.axisSoftMin", "value": 0 },
-                  { "id": "custom.lineInterpolation", "value": "linear" },
+                  { "id": "custom.axisPlacement", "value": "left" },
+                  { "id": "custom.axisLabel", "value": "Consumer Count" },
+                  { "id": "custom.lineInterpolation", "value": "stepAfter" },
                   { "id": "custom.lineWidth", "value": 2 },
                   { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } },
-                  { "id": "custom.fillOpacity", "value": 0 },
-                  { "id": "custom.pointSize", "value": 0 },
+                  { "id": "custom.axisSoftMin", "value": 0 },
+                  { "id": "custom.axisSoftMax", "value": 5 },
+                  { "id": "decimals", "value": 0 },
                   { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }
                 ]
               }
@@ -160,15 +160,15 @@ data:
             },
             {
               "datasource": { "type": "prometheus", "uid": "prometheus" },
-              "expr": "vector(500)",
-              "legendFormat": "Scaling Threshold",
+              "expr": "kafka_lag_scaler_desired_consumers",
+              "legendFormat": "Desired Consumers",
               "interval": "5s"
             }
           ]
         },
         {
           "id": 2,
-          "title": "Scaler Triggered",
+          "title": "Consumers Stalled",
           "type": "timeseries",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "gridPos": { "x": 0, "y": 12, "w": 24, "h": 4 },
@@ -185,7 +185,7 @@ data:
             {
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "expr": "increase(kafka_lag_scaler_activations_total[30s]) > 0",
-              "legendFormat": "triggered",
+              "legendFormat": "stalled",
               "interval": "10s"
             }
           ]

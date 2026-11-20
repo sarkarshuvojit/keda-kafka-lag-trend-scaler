@@ -48,15 +48,17 @@ func (s *MetricsScraper) fetch(ctx context.Context) {
 		log.Printf("Error fetching lag: %v", err)
 		return
 	}
-
-	s.window.Add(samples...)
 	metrics.UpdateLag(samples)
-	log.Printf("Collected %d lag samples (window size: %d)", len(samples), s.window.Len())
 
 	count, err := s.fetcher.FetchConsumerGroupSize(ctx)
 	if err != nil {
+		// The trend fit is segmented by consumer count, so a batch without one
+		// is useless. Skip it; the fit tolerates the gap.
 		log.Printf("Error fetching consumer group size: %v", err)
 		return
 	}
 	metrics.UpdateConsumerCount(s.fetcher.Topic(), s.fetcher.ConsumerGroup(), count)
+
+	s.window.Add(lag.NewBatch(samples, count))
+	log.Printf("Collected batch: partitions=%d consumers=%d (window: %d batches)", len(samples), count, s.window.Len())
 }

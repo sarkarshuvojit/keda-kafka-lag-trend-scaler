@@ -1,154 +1,142 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestParseFromMetadata_Defaults(t *testing.T) {
-	meta := map[string]string{
-		"topic":         "my-topic",
-		"consumerGroup": "my-group",
-	}
+func base() map[string]string {
+	return map[string]string{"topic": "my-topic", "consumerGroup": "my-group"}
+}
 
-	cfg, err := ParseFromMetadata(meta)
+func with(kv ...string) map[string]string {
+	m := base()
+	for i := 0; i+1 < len(kv); i += 2 {
+		m[kv[i]] = kv[i+1]
+	}
+	return m
+}
+
+func TestParseFromMetadata_Defaults(t *testing.T) {
+	cfg, err := ParseFromMetadata(base())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.LagThreshold != 500 {
-		t.Errorf("expected default lagThreshold 500, got %d", cfg.LagThreshold)
+	checks := []struct {
+		name      string
+		got, want any
+	}{
+		{"bootstrapServers", cfg.BootstrapServers, "localhost:9092"},
+		{"samplingInterval", cfg.SamplingInterval, 10 * time.Second},
+		{"minLag", cfg.MinLag, int64(100)},
+		{"maxDrain", cfg.MaxDrain, 300 * time.Second},
+		{"trendWindow", cfg.TrendWindow, 120 * time.Second},
+		{"headroom", cfg.Headroom, 1.2},
+		{"perConsumerRate", cfg.PerConsumerRate, 0.0},
+		{"capacitySmoothing", cfg.CapacitySmoothing, 0.3},
+		{"minConsumers", cfg.MinConsumers, 1},
+		{"maxConsumers", cfg.MaxConsumers, 0},
+		{"minSamples", cfg.MinSamples, 6},
 	}
-	if cfg.SustainDuration != 120*time.Second {
-		t.Errorf("expected default sustainDuration 120s, got %s", cfg.SustainDuration)
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
 	}
-	if cfg.SamplingInterval != 10*time.Second {
-		t.Errorf("expected default samplingInterval 10s, got %s", cfg.SamplingInterval)
-	}
-	if cfg.WindowSize != 30 {
-		t.Errorf("expected default windowSize 30, got %d", cfg.WindowSize)
-	}
-	if cfg.BootstrapServers != "localhost:9092" {
-		t.Errorf("expected default bootstrapServers, got %s", cfg.BootstrapServers)
+	if cfg.WindowDuration() != 140*time.Second {
+		t.Errorf("window duration = %s, want 2m20s", cfg.WindowDuration())
 	}
 }
 
 func TestParseFromMetadata_AllFields(t *testing.T) {
-	meta := map[string]string{
-		"bootstrapServers": "broker1:9092,broker2:9092",
-		"topic":            "orders",
-		"consumerGroup":    "order-processor",
-		"lagThreshold":     "1000",
-		"sustainSeconds":   "60",
-		"samplingInterval": "5",
-		"windowSize":       "50",
-	}
-
-	cfg, err := ParseFromMetadata(meta)
+	cfg, err := ParseFromMetadata(map[string]string{
+		"bootstrapServers":   "broker1:9092,broker2:9092",
+		"topic":              "orders",
+		"consumerGroup":      "order-processor",
+		"samplingInterval":   "5",
+		"minLag":             "50",
+		"maxDrainSeconds":    "600",
+		"trendWindowSeconds": "180",
+		"headroom":           "1.5",
+		"perConsumerRate":    "42.5",
+		"capacitySmoothing":  "0.5",
+		"minConsumers":       "2",
+		"maxConsumers":       "12",
+		"minSamples":         "10",
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.BootstrapServers != "broker1:9092,broker2:9092" {
-		t.Errorf("bootstrapServers = %s", cfg.BootstrapServers)
+	if cfg.BootstrapServers != "broker1:9092,broker2:9092" || cfg.Topic != "orders" || cfg.ConsumerGroup != "order-processor" {
+		t.Errorf("connection fields wrong: %+v", cfg)
 	}
-	if cfg.Topic != "orders" {
-		t.Errorf("topic = %s", cfg.Topic)
-	}
-	if cfg.ConsumerGroup != "order-processor" {
-		t.Errorf("consumerGroup = %s", cfg.ConsumerGroup)
-	}
-	if cfg.LagThreshold != 1000 {
-		t.Errorf("lagThreshold = %d", cfg.LagThreshold)
-	}
-	if cfg.SustainDuration != 60*time.Second {
-		t.Errorf("sustainDuration = %s", cfg.SustainDuration)
-	}
-	if cfg.SamplingInterval != 5*time.Second {
-		t.Errorf("samplingInterval = %s", cfg.SamplingInterval)
-	}
-	if cfg.WindowSize != 50 {
-		t.Errorf("windowSize = %d", cfg.WindowSize)
+	p := cfg.TrendParams()
+	if cfg.SamplingInterval != 5*time.Second ||
+		p.MinLag != 50 ||
+		p.MaxDrain != 600*time.Second ||
+		p.TrendWindow != 180*time.Second ||
+		p.Headroom != 1.5 ||
+		p.PerConsumerRate != 42.5 ||
+		p.CapacitySmoothing != 0.5 ||
+		p.MinConsumers != 2 ||
+		p.MaxConsumers != 12 ||
+		p.MinSamples != 10 {
+		t.Errorf("unexpected params: %+v", p)
 	}
 }
 
 func TestParseFromMetadata_MissingTopic(t *testing.T) {
-	meta := map[string]string{
-		"consumerGroup": "my-group",
-	}
-
-	_, err := ParseFromMetadata(meta)
-	if err == nil {
-		t.Fatal("expected error for missing topic")
-	}
-	if err.Error() != "topic is required" {
-		t.Errorf("unexpected error message: %v", err)
+	_, err := ParseFromMetadata(map[string]string{"consumerGroup": "my-group"})
+	if err == nil || err.Error() != "topic is required" {
+		t.Fatalf("expected 'topic is required', got %v", err)
 	}
 }
 
 func TestParseFromMetadata_MissingConsumerGroup(t *testing.T) {
-	meta := map[string]string{
-		"topic": "my-topic",
-	}
-
-	_, err := ParseFromMetadata(meta)
-	if err == nil {
-		t.Fatal("expected error for missing consumerGroup")
-	}
-	if err.Error() != "consumerGroup is required" {
-		t.Errorf("unexpected error message: %v", err)
+	_, err := ParseFromMetadata(map[string]string{"topic": "my-topic"})
+	if err == nil || err.Error() != "consumerGroup is required" {
+		t.Fatalf("expected 'consumerGroup is required', got %v", err)
 	}
 }
 
-func TestParseFromMetadata_InvalidLagThreshold(t *testing.T) {
-	meta := map[string]string{
-		"topic":         "my-topic",
-		"consumerGroup": "my-group",
-		"lagThreshold":  "not-a-number",
-	}
-
-	_, err := ParseFromMetadata(meta)
-	if err == nil {
-		t.Fatal("expected error for invalid lagThreshold")
-	}
-}
-
-func TestParseFromMetadata_InvalidSustainSeconds(t *testing.T) {
-	meta := map[string]string{
-		"topic":          "my-topic",
-		"consumerGroup":  "my-group",
-		"sustainSeconds": "abc",
-	}
-
-	_, err := ParseFromMetadata(meta)
-	if err == nil {
-		t.Fatal("expected error for invalid sustainSeconds")
+func TestParseFromMetadata_InvalidNumbers(t *testing.T) {
+	for _, key := range []string{
+		"samplingInterval", "minLag", "maxDrainSeconds", "trendWindowSeconds",
+		"headroom", "perConsumerRate", "capacitySmoothing", "minConsumers",
+		"maxConsumers", "minSamples",
+	} {
+		t.Run(key, func(t *testing.T) {
+			_, err := ParseFromMetadata(with(key, "not-a-number"))
+			if err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("expected parse error naming %s, got %v", key, err)
+			}
+		})
 	}
 }
 
-func TestParseFromMetadata_InvalidSamplingInterval(t *testing.T) {
-	meta := map[string]string{
-		"topic":            "my-topic",
-		"consumerGroup":    "my-group",
-		"samplingInterval": "xyz",
+func TestParseFromMetadata_Validation(t *testing.T) {
+	cases := map[string][]string{
+		"zero sampling":            {"samplingInterval", "0"},
+		"negative minLag":          {"minLag", "-1"},
+		"zero maxDrain":            {"maxDrainSeconds", "0"},
+		"window too short":         {"trendWindowSeconds", "15"},
+		"zero headroom":            {"headroom", "0"},
+		"negative perConsumerRate": {"perConsumerRate", "-3"},
+		"smoothing zero":           {"capacitySmoothing", "0"},
+		"smoothing above one":      {"capacitySmoothing", "1.5"},
+		"negative minConsumers":    {"minConsumers", "-1"},
+		"max below min":            {"minConsumers", "5", "maxConsumers", "3"},
+		"minSamples too low":       {"minSamples", "1"},
 	}
-
-	_, err := ParseFromMetadata(meta)
-	if err == nil {
-		t.Fatal("expected error for invalid samplingInterval")
-	}
-}
-
-func TestParseFromMetadata_InvalidWindowSize(t *testing.T) {
-	meta := map[string]string{
-		"topic":         "my-topic",
-		"consumerGroup": "my-group",
-		"windowSize":    "big",
-	}
-
-	_, err := ParseFromMetadata(meta)
-	if err == nil {
-		t.Fatal("expected error for invalid windowSize")
+	for name, kv := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseFromMetadata(with(kv...)); err == nil {
+				t.Fatalf("expected validation error for %v", kv)
+			}
+		})
 	}
 }
 
@@ -156,71 +144,61 @@ func TestParseFromMetadata_EnvVarFallback(t *testing.T) {
 	t.Setenv("KAFKA_BROKERS", "env-broker:9092")
 	t.Setenv("KAFKA_TOPIC", "env-topic")
 	t.Setenv("KAFKA_GROUP_ID", "env-group")
-	t.Setenv("LAG_THRESHOLD", "750")
-	t.Setenv("SUSTAIN_SECONDS", "90")
 	t.Setenv("SAMPLING_INTERVAL", "15")
-	t.Setenv("WINDOW_SIZE", "20")
+	t.Setenv("MIN_LAG", "250")
+	t.Setenv("MAX_DRAIN_SECONDS", "90")
+	t.Setenv("TREND_WINDOW_SECONDS", "60")
+	t.Setenv("HEADROOM", "1.1")
+	t.Setenv("PER_CONSUMER_RATE", "7")
+	t.Setenv("CAPACITY_SMOOTHING", "0.9")
+	t.Setenv("MIN_CONSUMERS", "0")
+	t.Setenv("MAX_CONSUMERS", "8")
+	t.Setenv("MIN_SAMPLES", "3")
 
-	// Pass nil metadata — everything comes from env
-	cfg, err := ParseFromMetadata(nil)
+	cfg, err := ParseFromEnv()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	if cfg.BootstrapServers != "env-broker:9092" {
-		t.Errorf("bootstrapServers = %s, want env-broker:9092", cfg.BootstrapServers)
+	if cfg.BootstrapServers != "env-broker:9092" || cfg.Topic != "env-topic" || cfg.ConsumerGroup != "env-group" {
+		t.Errorf("connection fields wrong: %+v", cfg)
 	}
-	if cfg.Topic != "env-topic" {
-		t.Errorf("topic = %s", cfg.Topic)
-	}
-	if cfg.ConsumerGroup != "env-group" {
-		t.Errorf("consumerGroup = %s", cfg.ConsumerGroup)
-	}
-	if cfg.LagThreshold != 750 {
-		t.Errorf("lagThreshold = %d, want 750", cfg.LagThreshold)
-	}
-	if cfg.SustainDuration != 90*time.Second {
-		t.Errorf("sustainDuration = %s, want 1m30s", cfg.SustainDuration)
-	}
-	if cfg.SamplingInterval != 15*time.Second {
-		t.Errorf("samplingInterval = %s, want 15s", cfg.SamplingInterval)
-	}
-	if cfg.WindowSize != 20 {
-		t.Errorf("windowSize = %d, want 20", cfg.WindowSize)
+	if cfg.SamplingInterval != 15*time.Second ||
+		cfg.MinLag != 250 ||
+		cfg.MaxDrain != 90*time.Second ||
+		cfg.TrendWindow != 60*time.Second ||
+		cfg.Headroom != 1.1 ||
+		cfg.PerConsumerRate != 7 ||
+		cfg.CapacitySmoothing != 0.9 ||
+		cfg.MinConsumers != 0 ||
+		cfg.MaxConsumers != 8 ||
+		cfg.MinSamples != 3 {
+		t.Errorf("env values not applied: %+v", cfg)
 	}
 }
 
 func TestParseFromMetadata_MetadataOverridesEnv(t *testing.T) {
 	t.Setenv("KAFKA_BROKERS", "env-broker:9092")
-	t.Setenv("LAG_THRESHOLD", "999")
+	t.Setenv("MAX_DRAIN_SECONDS", "999")
 
-	meta := map[string]string{
-		"bootstrapServers": "meta-broker:9092",
-		"topic":            "my-topic",
-		"consumerGroup":    "my-group",
-		"lagThreshold":     "100",
-	}
-
-	cfg, err := ParseFromMetadata(meta)
+	cfg, err := ParseFromMetadata(with("bootstrapServers", "meta-broker:9092", "maxDrainSeconds", "100"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	if cfg.BootstrapServers != "meta-broker:9092" {
-		t.Errorf("expected metadata to override env, got %s", cfg.BootstrapServers)
+		t.Errorf("bootstrapServers = %s, want metadata value", cfg.BootstrapServers)
 	}
-	if cfg.LagThreshold != 100 {
-		t.Errorf("expected metadata lagThreshold 100, got %d", cfg.LagThreshold)
+	if cfg.MaxDrain != 100*time.Second {
+		t.Errorf("maxDrain = %s, want metadata value 100s", cfg.MaxDrain)
 	}
 }
 
-func TestParseFromMetadata_InvalidEnvVars(t *testing.T) {
+func TestParseFromMetadata_InvalidEnvVar(t *testing.T) {
 	t.Setenv("KAFKA_TOPIC", "env-topic")
 	t.Setenv("KAFKA_GROUP_ID", "env-group")
-	t.Setenv("LAG_THRESHOLD", "not-a-number")
+	t.Setenv("MAX_DRAIN_SECONDS", "soon")
 
-	_, err := ParseFromMetadata(nil)
-	if err == nil {
-		t.Fatal("expected error for invalid LAG_THRESHOLD env var")
+	_, err := ParseFromEnv()
+	if err == nil || !strings.Contains(err.Error(), "MAX_DRAIN_SECONDS") {
+		t.Fatalf("expected error naming MAX_DRAIN_SECONDS, got %v", err)
 	}
 }
