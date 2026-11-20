@@ -64,6 +64,9 @@ data:
     providers:
       - name: lag-scaler
         type: file
+        # Re-read the dashboard file every 10s, so `kubectl apply` of this
+        # ConfigMap shows up without restarting Grafana.
+        updateIntervalSeconds: 10
         options:
           path: /etc/grafana/provisioning/dashboards
   lag-scaler.json: |
@@ -241,12 +244,11 @@ spec:
             - name: provisioning
               mountPath: /etc/grafana/provisioning/datasources/datasource.yaml
               subPath: datasource.yaml
-            - name: provisioning
-              mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml
-              subPath: dashboards.yaml
-            - name: provisioning
-              mountPath: /etc/grafana/provisioning/dashboards/lag-scaler.json
-              subPath: lag-scaler.json
+            # Mounted as a directory, not via subPath: subPath mounts never
+            # receive ConfigMap updates, so dashboard edits would need a pod
+            # restart to appear.
+            - name: dashboards
+              mountPath: /etc/grafana/provisioning/dashboards
             - name: data
               mountPath: /var/lib/grafana
           resources:
@@ -263,5 +265,13 @@ spec:
         - name: provisioning
           configMap:
             name: grafana-provisioning
+        - name: dashboards
+          configMap:
+            name: grafana-provisioning
+            items:
+              - key: dashboards.yaml
+                path: dashboards.yaml
+              - key: lag-scaler.json
+                path: lag-scaler.json
         - name: data
           emptyDir: {}
