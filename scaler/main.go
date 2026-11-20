@@ -11,13 +11,13 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/config"
-	pb "github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/externalscaler"
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/kafka"
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/lag"
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/metrics"
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/scraper"
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/server"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/config"
+	pb "github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/externalscaler"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/kafka"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/lag"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/metrics"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/scraper"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/server"
 )
 
 func main() {

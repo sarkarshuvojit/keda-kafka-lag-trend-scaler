@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: kafka-consumer
-          image: kpkls:latest
+          image: lag-trend-sample-app:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: KAFKA_BROKERS

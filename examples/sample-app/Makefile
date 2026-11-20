@@ -1,4 +1,4 @@
-IMAGE_NAME := kpkls
+IMAGE_NAME := lag-trend-sample-app
 IMAGE_TAG := latest
 
 .PHONY: build

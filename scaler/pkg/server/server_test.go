@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/config"
-	pb "github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/externalscaler"
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/lag"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/config"
+	pb "github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/externalscaler"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/lag"
 )
 
 func defaultConfig() *config.ScalerConfig {

@@ -65,14 +65,14 @@ From the repo root, run:
 ./start.sh [--partitions N]
 ```
 
-This builds the sample-app and scaler images against minikube's Docker daemon, applies the infra manifests (Kafka, kafbat UI, Prometheus, Grafana), explicitly creates `test-topic` with `N` partitions (default `3`, useful for testing scaling behavior across more partitions than Kafka's single-partition auto-create default), deploys the consumer/producer/lag-scaler, and applies the persistent `ScaledObject`.
+This builds the sample-app and scaler images against minikube's Docker daemon, applies the infra manifests (Kafka, kafbat UI, Prometheus, Grafana), explicitly creates `test-topic` with `N` partitions (default `3`, useful for testing scaling behavior across more partitions than Kafka's single-partition auto-create default), deploys the consumer/producer/lag-scaler, and applies the trend `ScaledObject`.
 
 To do the same steps by hand instead:
 
 ```bash
 eval $(minikube docker-env)
-docker build -t kpkls:latest examples/sample-app
-docker build -t kpkls-scaler:latest scaler
+docker build -t lag-trend-sample-app:latest examples/sample-app
+docker build -t lag-trend-scaler:latest scaler
 
 kubectl apply -f examples/k8s/infra/
 kubectl exec deploy/kafka -- /opt/kafka/bin/kafka-topics.sh \
@@ -133,7 +133,7 @@ lag-scaler   ClusterIP   10.96.xxx.xxx   <none>        50051/TCP   30s
 
 ## Step 3: Verify the ScaledObject
 
-`start.sh` already removes the basic (threshold-based) ScaledObject if present and applies the persistent one (`examples/k8s/scalers/persistent/scaledobject.yaml`). To check KEDA picked it up:
+`start.sh` already removes the basic (threshold-based) ScaledObject if present and applies the trend one (`examples/k8s/scalers/trend/scaledobject.yaml`). To check KEDA picked it up:
 
 ```bash
 kubectl get scaledobject kafka-consumer-scaler

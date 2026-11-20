@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tears down everything start.sh stood up on minikube: the persistent
+# Tears down everything start.sh stood up on minikube: the trend
 # ScaledObject, consumer/producer/lag-scaler deployments, and infra
 # (kafka, kafbat UI, prometheus, grafana). Leaves minikube itself
 # running.
@@ -14,8 +14,8 @@ if ! minikube status >/dev/null 2>&1; then
   exit 0
 fi
 
-echo "==> Deleting persistent ScaledObject"
-kubectl delete -f "$ROOT_DIR/examples/k8s/scalers/persistent/scaledobject.yaml" --ignore-not-found
+echo "==> Deleting trend ScaledObject"
+kubectl delete -f "$ROOT_DIR/examples/k8s/scalers/trend/scaledobject.yaml" --ignore-not-found
 
 echo "==> Deleting consumer, producer, and lag-scaler"
 kubectl delete \

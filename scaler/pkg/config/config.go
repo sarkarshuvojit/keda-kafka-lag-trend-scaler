@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/lag"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/lag"
 )
 
 type ScalerConfig struct {
