@@ -4,7 +4,7 @@ This documents the local run behind [`docs/test-results-annotated.png`](./test-r
 
 ## Setup
 
-Deployed on minikube with [`start.sh`](../start.sh): Kafka with `test-topic` at **10 partitions**, a single consumer (~10 msg/s: `ReadMessage` + 100ms sleep), the lag-scaler, and the `ScaledObject` in [`examples/k8s/scalers/persistent/scaledobject.yaml`](../examples/k8s/scalers/persistent/scaledobject.yaml) (`pollingInterval: 10`, `minReplicaCount: 1`, `maxReplicaCount: 10`).
+Deployed on minikube with [`start.sh`](../start.sh): Kafka with `test-topic` at **10 partitions**, a single consumer (~10 msg/s: `ReadMessage` + 100ms sleep), the lag-scaler, and the `ScaledObject` in [`examples/k8s/scalers/trend/scaledobject.yaml`](../examples/k8s/scalers/trend/scaledobject.yaml) (`pollingInterval: 10`, `minReplicaCount: 1`, `maxReplicaCount: 10`).
 
 Scaler settings, from [`examples/k8s/deploy/lag-scaler.yaml`](../examples/k8s/deploy/lag-scaler.yaml):
 

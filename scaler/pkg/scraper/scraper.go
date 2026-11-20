@@ -5,9 +5,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/kafka"
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/lag"
-	"github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/scaler/pkg/metrics"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/kafka"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/lag"
+	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/metrics"
 )
 
 type MetricsScraper struct {

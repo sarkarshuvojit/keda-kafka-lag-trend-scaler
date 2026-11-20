@@ -1,4 +1,4 @@
-IMAGE_NAME := kpkls-scaler
+IMAGE_NAME := lag-trend-scaler
 IMAGE_TAG := latest
 
 .PHONY: proto-gen

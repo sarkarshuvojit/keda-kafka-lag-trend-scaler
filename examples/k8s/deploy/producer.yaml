@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: kafka-producer
-          image: kpkls:latest
+          image: lag-trend-sample-app:latest
           imagePullPolicy: IfNotPresent
           args: ["--mode=producer"]
           ports:

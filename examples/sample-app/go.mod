@@ -1,4 +1,4 @@
-module github.com/sarkarshuvojit/keda-persistent-kafka-lag-scaler/examples/sample-app
+module github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/examples/sample-app
 
 go 1.24.4
 

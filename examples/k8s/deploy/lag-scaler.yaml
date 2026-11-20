@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: lag-scaler
-          image: kpkls-scaler:latest
+          image: lag-trend-scaler:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 50051
