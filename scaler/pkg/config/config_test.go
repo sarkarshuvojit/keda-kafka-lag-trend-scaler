@@ -6,6 +6,21 @@ import (
 	"time"
 )
 
+// clearEnv blanks every env var the parser reads, so tests don't pick up
+// whatever the shell or CI job has set (e.g. KAFKA_BROKERS for integration
+// tests). An empty value counts as unset.
+func clearEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"KAFKA_BROKERS", "KAFKA_TOPIC", "KAFKA_GROUP_ID", "SAMPLING_INTERVAL",
+		"MIN_LAG", "MAX_DRAIN_SECONDS", "TREND_WINDOW_SECONDS", "HEADROOM",
+		"PER_CONSUMER_RATE", "CAPACITY_SMOOTHING", "MIN_CONSUMERS",
+		"MAX_CONSUMERS", "MIN_SAMPLES",
+	} {
+		t.Setenv(k, "")
+	}
+}
+
 func base() map[string]string {
 	return map[string]string{"topic": "my-topic", "consumerGroup": "my-group"}
 }
@@ -19,6 +34,7 @@ func with(kv ...string) map[string]string {
 }
 
 func TestParseFromMetadata_Defaults(t *testing.T) {
+	clearEnv(t)
 	cfg, err := ParseFromMetadata(base())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -51,6 +67,7 @@ func TestParseFromMetadata_Defaults(t *testing.T) {
 }
 
 func TestParseFromMetadata_AllFields(t *testing.T) {
+	clearEnv(t)
 	cfg, err := ParseFromMetadata(map[string]string{
 		"bootstrapServers":   "broker1:9092,broker2:9092",
 		"topic":              "orders",
@@ -89,6 +106,7 @@ func TestParseFromMetadata_AllFields(t *testing.T) {
 }
 
 func TestParseFromMetadata_MissingTopic(t *testing.T) {
+	clearEnv(t)
 	_, err := ParseFromMetadata(map[string]string{"consumerGroup": "my-group"})
 	if err == nil || err.Error() != "topic is required" {
 		t.Fatalf("expected 'topic is required', got %v", err)
@@ -96,6 +114,7 @@ func TestParseFromMetadata_MissingTopic(t *testing.T) {
 }
 
 func TestParseFromMetadata_MissingConsumerGroup(t *testing.T) {
+	clearEnv(t)
 	_, err := ParseFromMetadata(map[string]string{"topic": "my-topic"})
 	if err == nil || err.Error() != "consumerGroup is required" {
 		t.Fatalf("expected 'consumerGroup is required', got %v", err)
@@ -103,6 +122,7 @@ func TestParseFromMetadata_MissingConsumerGroup(t *testing.T) {
 }
 
 func TestParseFromMetadata_InvalidNumbers(t *testing.T) {
+	clearEnv(t)
 	for _, key := range []string{
 		"samplingInterval", "minLag", "maxDrainSeconds", "trendWindowSeconds",
 		"headroom", "perConsumerRate", "capacitySmoothing", "minConsumers",
@@ -118,6 +138,7 @@ func TestParseFromMetadata_InvalidNumbers(t *testing.T) {
 }
 
 func TestParseFromMetadata_Validation(t *testing.T) {
+	clearEnv(t)
 	cases := map[string][]string{
 		"zero sampling":            {"samplingInterval", "0"},
 		"negative minLag":          {"minLag", "-1"},
@@ -141,6 +162,7 @@ func TestParseFromMetadata_Validation(t *testing.T) {
 }
 
 func TestParseFromMetadata_EnvVarFallback(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("KAFKA_BROKERS", "env-broker:9092")
 	t.Setenv("KAFKA_TOPIC", "env-topic")
 	t.Setenv("KAFKA_GROUP_ID", "env-group")
@@ -177,6 +199,7 @@ func TestParseFromMetadata_EnvVarFallback(t *testing.T) {
 }
 
 func TestParseFromMetadata_MetadataOverridesEnv(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("KAFKA_BROKERS", "env-broker:9092")
 	t.Setenv("MAX_DRAIN_SECONDS", "999")
 
@@ -193,6 +216,7 @@ func TestParseFromMetadata_MetadataOverridesEnv(t *testing.T) {
 }
 
 func TestParseFromMetadata_InvalidEnvVar(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("KAFKA_TOPIC", "env-topic")
 	t.Setenv("KAFKA_GROUP_ID", "env-group")
 	t.Setenv("MAX_DRAIN_SECONDS", "soon")

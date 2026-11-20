@@ -1,5 +1,9 @@
 # Build stage
-FROM golang:1.24.4-alpine AS builder
+# Build on the runner's native platform and cross-compile for the target,
+# so multi-arch release builds don't run the Go toolchain under emulation.
+FROM --platform=$BUILDPLATFORM golang:1.24.4-alpine AS builder
+ARG TARGETOS=linux
+ARG TARGETARCH
 
 WORKDIR /app
 
@@ -13,7 +17,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app main.go
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o app .
 
 # Final stage
 FROM alpine:latest

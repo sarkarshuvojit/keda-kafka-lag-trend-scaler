@@ -78,7 +78,7 @@ func runConsumer() {
 			log.Println("Consumer stopped")
 			return
 		default:
-				msg, err := reader.ReadMessage(ctx)
+			msg, err := reader.ReadMessage(ctx)
 
 			if err != nil {
 				if ctx.Err() != nil {
@@ -92,8 +92,8 @@ func runConsumer() {
 			time.Sleep(100 * time.Millisecond)
 			latency := time.Since(msg.Time)
 			t.AddTime(latency)
-			log.Printf("[part: %d, offset: %d]message acked (latency: %.2f)",
-				msg.Partition, msg.Offset, latency)
+			log.Printf("[part: %d, offset: %d]message acked (latency: %.2fs)",
+				msg.Partition, msg.Offset, latency.Seconds())
 		}
 	}
 }

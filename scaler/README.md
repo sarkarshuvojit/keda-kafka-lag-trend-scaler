@@ -55,7 +55,14 @@ cd scaler
 make test
 ```
 
-All packages should report `ok`. `pkg/lag/trend_test.go` covers the core cases: rising, flat, fast-drain, slow-drain, burst jumps, capacity learning, scale-down, clamps, rebalances, partition changes, and offset resets.
+That runs the unit tests with the race detector. No Kafka is needed. To also run the integration tests against a real broker, with coverage (what CI runs):
+
+```bash
+docker run -d --rm -p 9092:9092 apache/kafka:3.9.0
+make test-integration
+```
+
+`pkg/lag/trend_test.go` covers the core decision cases: rising, flat, fast-drain, slow-drain, burst jumps, capacity learning, scale-down, idle groups, warm-up holds, clamps, rebalances, partition changes, and offset resets. `pkg/kafka/client_integration_test.go` checks real end offsets, committed offsets and group membership.
 
 ## Step 2: Start the Environment
 
@@ -240,7 +247,7 @@ grpcurl -plaintext -d '{"name":"test","namespace":"default"}' \
 ```
 scaler/
   main.go                       # Entry point: wires everything, gRPC server, signal handling
-  Makefile                      # build, proto-gen, test
+  Makefile                      # build, proto-gen, test, test-integration
   Dockerfile                    # Multi-stage alpine build
   proto/
     externalscaler.proto        # KEDA External Scaler proto (vendored)
@@ -248,6 +255,7 @@ scaler/
     externalscaler/             # Generated protobuf + gRPC Go code
     config/config.go            # ScalerConfig: parse from metadata or env vars
     kafka/client.go             # LagFetcher: per-partition lag + consumer group size via kafka-go Client API
+    kafka/client_integration_test.go  # Real-broker tests (build tag: integration)
     lag/
       sample.go                 # LagSample (per partition) and Batch (per scrape) types
       window.go                 # SlidingWindow of batches: thread-safe, time-based eviction
