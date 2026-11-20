@@ -173,3 +173,65 @@ func TestGetMetrics_ClampedToPartitions(t *testing.T) {
 		t.Errorf("desired = %d, want 4 (partition count)", got)
 	}
 }
+
+// fakeStream captures StreamIsActive responses. Embedding the interface
+// satisfies the methods the server never calls.
+type fakeStream struct {
+	pb.ExternalScaler_StreamIsActiveServer
+	ctx     context.Context
+	sendErr error
+	sent    chan *pb.IsActiveResponse
+}
+
+func (f *fakeStream) Context() context.Context { return f.ctx }
+
+func (f *fakeStream) Send(r *pb.IsActiveResponse) error {
+	if f.sendErr != nil {
+		return f.sendErr
+	}
+	f.sent <- r
+	return nil
+}
+
+func TestStreamIsActive_SendsEachTickUntilCancelled(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.SamplingInterval = 10 * time.Millisecond
+	srv, w := newServer(cfg)
+	scrape(w, 2*time.Minute, 3, 1, 3000, 10, 10)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := &fakeStream{ctx: ctx, sent: make(chan *pb.IsActiveResponse, 16)}
+	done := make(chan error, 1)
+	go func() { done <- srv.StreamIsActive(ref(), stream) }()
+
+	for range 2 {
+		select {
+		case r := <-stream.sent:
+			if !r.Result {
+				t.Error("expected active (lag 3000 >= minLag)")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("no stream response")
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("expected nil on cancel, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StreamIsActive did not return after cancel")
+	}
+}
+
+func TestStreamIsActive_SendErrorEndsStream(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.SamplingInterval = 10 * time.Millisecond
+	srv, _ := newServer(cfg)
+
+	stream := &fakeStream{ctx: context.Background(), sendErr: errors.New("client gone")}
+	if err := srv.StreamIsActive(ref(), stream); err == nil {
+		t.Fatal("expected error when Send fails")
+	}
+}

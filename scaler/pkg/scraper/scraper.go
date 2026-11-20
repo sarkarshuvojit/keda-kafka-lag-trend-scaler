@@ -5,18 +5,26 @@ import (
 	"log"
 	"time"
 
-	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/kafka"
 	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/lag"
 	"github.com/sarkarshuvojit/keda-kafka-lag-trend-scaler/scaler/pkg/metrics"
 )
 
+// Fetcher reads lag and group membership for one topic and consumer group.
+// *kafka.LagFetcher implements it.
+type Fetcher interface {
+	FetchLag(ctx context.Context) ([]lag.LagSample, error)
+	FetchConsumerGroupSize(ctx context.Context) (int, error)
+	Topic() string
+	ConsumerGroup() string
+}
+
 type MetricsScraper struct {
-	fetcher  *kafka.LagFetcher
+	fetcher  Fetcher
 	window   *lag.SlidingWindow
 	interval time.Duration
 }
 
-func New(fetcher *kafka.LagFetcher, window *lag.SlidingWindow, interval time.Duration) *MetricsScraper {
+func New(fetcher Fetcher, window *lag.SlidingWindow, interval time.Duration) *MetricsScraper {
 	return &MetricsScraper{
 		fetcher:  fetcher,
 		window:   window,
